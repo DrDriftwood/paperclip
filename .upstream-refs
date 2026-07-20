@@ -1,0 +1,9 @@
+# LARGE FORMAT — Paperclip upstream pin (single source of truth)
+# Adopted per LAR-621: carry local edits as numbered patches on a PINNED upstream base.
+# THE PIN is the resolved SHA below — never the tag string (this commit carries >1 tag).
+UPSTREAM_REMOTE=origin
+UPSTREAM_REMOTE_URL=https://github.com/paperclipai/paperclip.git
+UPSTREAM_RELEASE_TAG=v2026.707.0                                   # nearest release tag; informational, NOT the pin
+UPSTREAM_PIN_SHA=ce7dedf33d2689673826ffdcfd6af7ee06be39af         # THE PIN (resolved SHA)
+UPSTREAM_PIN_DESCRIBE_RELEASE=v2026.707.0-100-gce7dedf33          # git describe --match 'v*' (100 commits past release tag)
+UPSTREAM_PIN_DESCRIBE_CANARY=canary/v2026.713.0-canary.2-2-gce7dedf33  # same commit, different tag string (why we pin by SHA)

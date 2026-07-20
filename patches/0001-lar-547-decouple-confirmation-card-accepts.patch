@@ -1,0 +1,442 @@
+diff --git a/server/src/__tests__/issue-thread-interactions-service.test.ts b/server/src/__tests__/issue-thread-interactions-service.test.ts
+index 8a957a6b4e6ff4bfe751e68a05fc883c8fbb2112..61196f909b7a15ef0f71eebc80817d40ca73e83e 100644
+--- a/server/src/__tests__/issue-thread-interactions-service.test.ts
++++ b/server/src/__tests__/issue-thread-interactions-service.test.ts
+@@ -2142,10 +2142,13 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+       });
+     });
+ 
+-    it("refuses request_confirmation accept until the source run records a successful workspace_finalize", async () => {
++    it("records a request_confirmation accept immediately even when the source run's workspace has not finished syncing (LAR-547)", async () => {
+       const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId } =
+         await seedAcceptGateFixture();
+ 
++      // Only a worktree_prepare op exists for the source run — its sync-back
++      // (workspace_finalize) never landed. The accept must still be recorded
++      // rather than bounced with a 409.
+       await db.insert(workspaceOperations).values({
+         companyId,
+         executionWorkspaceId,
+@@ -2155,37 +2158,6 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+         startedAt: new Date("2026-05-23T22:00:00.000Z"),
+       });
+ 
+-      await expect(
+-        interactionsSvc.acceptInteraction(
+-          { id: issueId, companyId, goalId, projectId: null },
+-          interactionId,
+-          {},
+-          { userId: "local-board" },
+-        ),
+-      ).rejects.toMatchObject({
+-        status: 409,
+-        message: expect.stringContaining(
+-          "the run that created this interaction has not finished syncing its workspace",
+-        ),
+-        details: { executionWorkspaceId, sourceRunId },
+-      });
+-
+-      const row = await db
+-        .select()
+-        .from(issueThreadInteractions)
+-        .where(eq(issueThreadInteractions.id, interactionId))
+-        .then((rows) => rows[0]);
+-      expect(row?.status).toBe("pending");
+-
+-      await db.insert(workspaceOperations).values({
+-        companyId,
+-        executionWorkspaceId,
+-        heartbeatRunId: sourceRunId,
+-        phase: "workspace_finalize",
+-        status: "succeeded",
+-        startedAt: new Date("2026-05-23T22:05:00.000Z"),
+-      });
+-
+       const accepted = await interactionsSvc.acceptInteraction(
+         { id: issueId, companyId, goalId, projectId: null },
+         interactionId,
+@@ -2198,6 +2170,13 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+         kind: "request_confirmation",
+         status: "accepted",
+       });
++
++      const row = await db
++        .select()
++        .from(issueThreadInteractions)
++        .where(eq(issueThreadInteractions.id, interactionId))
++        .then((rows) => rows[0]);
++      expect(row?.status).toBe("accepted");
+     });
+ 
+     it("allows request_confirmation accept when sourceRunId is null", async () => {
+@@ -2265,7 +2244,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+       });
+     });
+ 
+-    it("refuses request_checkbox_confirmation accept until the source run records a successful workspace_finalize", async () => {
++    it("records a request_checkbox_confirmation accept immediately even when the source run's workspace has not finished syncing (LAR-547)", async () => {
+       const { companyId, executionWorkspaceId, issueId, goalId, interactionId, sourceRunId } =
+         await seedAcceptGateFixture({ kind: "request_checkbox_confirmation" });
+ 
+@@ -2278,30 +2257,6 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+         startedAt: new Date("2026-05-23T22:00:00.000Z"),
+       });
+ 
+-      await expect(
+-        interactionsSvc.acceptInteraction(
+-          { id: issueId, companyId, goalId, projectId: null },
+-          interactionId,
+-          { selectedOptionIds: ["file-a"] },
+-          { userId: "local-board" },
+-        ),
+-      ).rejects.toMatchObject({
+-        status: 409,
+-        message: expect.stringContaining(
+-          "the run that created this interaction has not finished syncing its workspace",
+-        ),
+-        details: { executionWorkspaceId, sourceRunId },
+-      });
+-
+-      await db.insert(workspaceOperations).values({
+-        companyId,
+-        executionWorkspaceId,
+-        heartbeatRunId: sourceRunId,
+-        phase: "workspace_finalize",
+-        status: "succeeded",
+-        startedAt: new Date("2026-05-23T22:10:00.000Z"),
+-      });
+-
+       const accepted = await interactionsSvc.acceptInteraction(
+         { id: issueId, companyId, goalId, projectId: null },
+         interactionId,
+@@ -2422,5 +2377,182 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
+         status: "accepted",
+       });
+     });
++
++    // LAR-547: an agent proposes an approval card at the end of its run, then
++    // starts its next queued issue before the creating run's workspace finishes
++    // syncing. When a board user accepts, the decision must be recorded AND the
++    // resulting execution queued onto a fresh isolated worktree instead of being
++    // bounced by the old workspace_finalize gate.
++    async function seedCreatorRoutingFixture(options?: { finalized: boolean }) {
++      const companyId = randomUUID();
++      const projectId = randomUUID();
++      const projectWorkspaceId = randomUUID();
++      const executionWorkspaceId = randomUUID();
++      const issueId = randomUUID();
++      const goalId = randomUUID();
++      const agentId = randomUUID();
++      const sourceRunId = randomUUID();
++
++      await db.insert(companies).values({
++        id: companyId,
++        name: "Paperclip",
++        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
++        requireBoardApprovalForNewAgents: false,
++      });
++      await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
++      await db.insert(projects).values({
++        id: projectId,
++        companyId,
++        name: "Project",
++        status: "in_progress",
++      });
++      await db.insert(projectWorkspaces).values({
++        id: projectWorkspaceId,
++        companyId,
++        projectId,
++        name: "Workspace",
++        sourceType: "local_path",
++        visibility: "default",
++        isPrimary: true,
++      });
++      await db.insert(agents).values({
++        id: agentId,
++        companyId,
++        name: "CodexCoder",
++        role: "engineer",
++        status: "active",
++        adapterType: "codex_local",
++        adapterConfig: {},
++        runtimeConfig: {},
++        permissions: {},
++      });
++      await db.insert(heartbeatRuns).values({
++        id: sourceRunId,
++        companyId,
++        agentId,
++        invocationSource: "manual",
++        status: "succeeded",
++        startedAt: new Date("2026-05-23T21:55:00.000Z"),
++        finishedAt: new Date("2026-05-23T22:05:00.000Z"),
++      });
++      await db.insert(executionWorkspaces).values({
++        id: executionWorkspaceId,
++        companyId,
++        projectId,
++        projectWorkspaceId,
++        mode: "isolated_workspace",
++        strategyType: "git_worktree",
++        name: "exec",
++        status: "active",
++        providerType: "git_worktree",
++      });
++      await db.insert(goals).values({
++        id: goalId,
++        companyId,
++        title: "Creator routing fixture",
++        level: "task",
++        status: "active",
++      });
++      await db.insert(issues).values({
++        id: issueId,
++        companyId,
++        projectId,
++        goalId,
++        title: "Ship it card",
++        status: "in_review",
++        priority: "medium",
++        assigneeUserId: "local-board",
++        executionWorkspaceId,
++      });
++
++      // The creating run's only workspace op is worktree_prepare unless the test
++      // asks for a finalized (fully synced) workspace.
++      await db.insert(workspaceOperations).values({
++        companyId,
++        executionWorkspaceId,
++        heartbeatRunId: sourceRunId,
++        phase: "worktree_prepare",
++        status: "succeeded",
++        startedAt: new Date("2026-05-23T22:00:00.000Z"),
++      });
++      if (options?.finalized) {
++        await db.insert(workspaceOperations).values({
++          companyId,
++          executionWorkspaceId,
++          heartbeatRunId: sourceRunId,
++          phase: "workspace_finalize",
++          status: "succeeded",
++          startedAt: new Date("2026-05-23T22:05:00.000Z"),
++        });
++      }
++
++      const created = await interactionsSvc.create({
++        id: issueId,
++        companyId,
++      }, {
++        kind: "request_confirmation",
++        continuationPolicy: "wake_assignee_on_accept",
++        sourceRunId,
++        payload: {
++          version: 1,
++          prompt: "Ship it?",
++          acceptLabel: "Ship it",
++        },
++      }, {
++        agentId,
++      });
++
++      return { companyId, issueId, goalId, agentId, interactionId: created.id };
++    }
++
++    it("records the decision and queues execution on a fresh isolated worktree when the creating run's workspace is still syncing (LAR-547)", async () => {
++      const { companyId, issueId, goalId, agentId, interactionId } = await seedCreatorRoutingFixture();
++
++      const accepted = await interactionsSvc.acceptInteraction(
++        { id: issueId, companyId, goalId, projectId: null },
++        interactionId,
++        {},
++        { userId: "local-board" },
++      );
++
++      // Decision is recorded and the issue is handed back to the creating agent.
++      expect(accepted.interaction).toMatchObject({ id: interactionId, status: "accepted" });
++      expect(accepted.continuationIssue).toEqual({
++        id: issueId,
++        assigneeAgentId: agentId,
++        assigneeUserId: null,
++        status: "todo",
++      });
++
++      // Execution is routed onto a fresh isolated worktree rather than reusing
++      // the creating run's still-syncing workspace.
++      const updatedIssue = (await db.select().from(issues)).find((issue) => issue.id === issueId);
++      expect(updatedIssue?.executionWorkspacePreference).toBe("isolated_workspace");
++      expect(updatedIssue?.executionWorkspaceSettings).toMatchObject({ mode: "isolated_workspace" });
++    });
++
++    it("does not force a fresh worktree when the creating run's workspace has already finished syncing (LAR-547 regression)", async () => {
++      const { companyId, issueId, goalId, agentId, interactionId } =
++        await seedCreatorRoutingFixture({ finalized: true });
++
++      const accepted = await interactionsSvc.acceptInteraction(
++        { id: issueId, companyId, goalId, projectId: null },
++        interactionId,
++        {},
++        { userId: "local-board" },
++      );
++
++      expect(accepted.interaction).toMatchObject({ id: interactionId, status: "accepted" });
++      expect(accepted.continuationIssue).toEqual({
++        id: issueId,
++        assigneeAgentId: agentId,
++        assigneeUserId: null,
++        status: "todo",
++      });
++
++      // Synced workspace → normal accept, no forced fresh-worktree override.
++      const updatedIssue = (await db.select().from(issues)).find((issue) => issue.id === issueId);
++      expect(updatedIssue?.executionWorkspacePreference ?? null).toBeNull();
++    });
+   });
+ });
+diff --git a/server/src/services/issue-thread-interactions.ts b/server/src/services/issue-thread-interactions.ts
+index 5a2a3ae19dae91faa1c50404cca22853478860f3..a1bf097d5abf24f1ac73008a0fae899c3d444e2c 100644
+--- a/server/src/services/issue-thread-interactions.ts
++++ b/server/src/services/issue-thread-interactions.ts
+@@ -873,12 +873,22 @@ export function issueThreadInteractionService(db: Db) {
+       .then((rows) => rows[0] ?? null);
+   }
+ 
+-  async function assertIssueWorkspaceFinalizedForAccept(args: {
++  // LAR-547: A confirmation-card accept records an operator DECISION and must
++  // never be refused because of the creating run's worktree state. Worktree
++  // state is an execution concern, not a decision concern. This resolver
++  // reports whether the creating run's execution workspace has NOT finished
++  // syncing (finalize pending/failed) so the caller can queue the resulting
++  // execution onto a fresh isolated worktree instead of bouncing the accept —
++  // mirroring the re-issue-on-isolated-workspace recovery flow. It replaces the
++  // hard workspace_finalize gate that previously threw a 409 here (PAPA-430),
++  // which could bounce accepts indefinitely when the creating run moved on to
++  // its next queued issue before its sync-back completed.
++  async function creatingRunWorkspaceNeedsFreshWorktree(args: {
+     db: Pick<Db, "select">;
+     issue: { id: string; companyId: string };
+     sourceRunId: string | null;
+-  }) {
+-    if (!args.sourceRunId) return;
++  }): Promise<boolean> {
++    if (!args.sourceRunId) return false;
+ 
+     const executionWorkspaceId = await args.db
+       .select({ executionWorkspaceId: issues.executionWorkspaceId })
+@@ -886,7 +896,7 @@ export function issueThreadInteractionService(db: Db) {
+       .where(eq(issues.id, args.issue.id))
+       .then((rows: Array<{ executionWorkspaceId: string | null }>) => rows[0]?.executionWorkspaceId ?? null);
+ 
+-    if (!executionWorkspaceId) return;
++    if (!executionWorkspaceId) return false;
+ 
+     const isFinalized = await runWorkspaceIsFinalized(
+       args.db,
+@@ -894,13 +904,33 @@ export function issueThreadInteractionService(db: Db) {
+       executionWorkspaceId,
+       args.sourceRunId,
+     );
+-    if (isFinalized) return;
++    return !isFinalized;
++  }
+ 
+-    throw conflict(
+-      "Cannot accept interaction: the run that created this interaction has not finished syncing its workspace. "
+-        + "Retry once the local worktree has finished syncing.",
+-      { executionWorkspaceId, sourceRunId: args.sourceRunId },
+-    );
++  // LAR-547: Build the issue patch that routes an accepted card's execution onto
++  // a fresh isolated worktree when the creating run's workspace is still
++  // syncing. Forcing `isolated_workspace` (both as the reuse preference and the
++  // resolved mode) guarantees the assignee's next run provisions a brand-new
++  // worktree instead of reusing the stale, mid-sync one; existing workspace
++  // settings (e.g. environmentId) are preserved. The stale workspace is left
++  // linked so the end-of-run cleanup idles it once the fresh run finalizes.
++  async function buildFreshExecutionWorkspacePatch(
++    tx: Pick<Db, "select">,
++    issueId: string,
++  ): Promise<Partial<typeof issues.$inferInsert>> {
++    const existingSettings = await tx
++      .select({ executionWorkspaceSettings: issues.executionWorkspaceSettings })
++      .from(issues)
++      .where(eq(issues.id, issueId))
++      .then((rows) => rows[0]?.executionWorkspaceSettings ?? null);
++    const baseSettings =
++      existingSettings && typeof existingSettings === "object"
++        ? (existingSettings as Record<string, unknown>)
++        : {};
++    return {
++      executionWorkspacePreference: "isolated_workspace",
++      executionWorkspaceSettings: { ...baseSettings, mode: "isolated_workspace" },
++    };
+   }
+ 
+   async function getPendingInteractionForResolution(args: {
+@@ -928,6 +958,9 @@ export function issueThreadInteractionService(db: Db) {
+     current: IssueThreadInteractionRow;
+     input: AcceptIssueThreadInteraction;
+     actor: InteractionActor;
++    // LAR-547: when true, route the returned issue's execution onto a fresh
++    // isolated worktree because the creating run's workspace has not synced.
++    forceFreshExecutionWorkspace?: boolean;
+   }): Promise<{
+     interaction: IssueThreadInteraction;
+     continuationIssue: IssueWakeTarget | null;
+@@ -998,12 +1031,16 @@ export function issueThreadInteractionService(db: Db) {
+         actor: args.actor,
+       })) {
+         const returnStatus = issueContext.status === "blocked" ? "blocked" : "todo";
++        const freshWorkspacePatch = args.forceFreshExecutionWorkspace
++          ? await buildFreshExecutionWorkspacePatch(tx, args.issue.id)
++          : {};
+         const returnedIssue = await issueService(db).update(args.issue.id, {
+           status: returnStatus,
+           assigneeAgentId: args.current.createdByAgentId,
+           assigneeUserId: null,
+           actorAgentId: args.actor.agentId ?? null,
+           actorUserId: args.actor.userId ?? null,
++          ...freshWorkspacePatch,
+         }, tx);
+ 
+         if (returnedIssue) {
+@@ -1217,12 +1254,20 @@ export function issueThreadInteractionService(db: Db) {
+           // workspace_finalize gate (PAPA-440) does not apply here.
+           return issueThreadInteractionService(db).acceptSuggestedTasks(issue, interactionId, data, actor);
+         case "request_confirmation": {
+-          await assertIssueWorkspaceFinalizedForAccept({ db, issue, sourceRunId: current.sourceRunId });
++          // LAR-547: record the decision immediately; if the creating run's
++          // workspace is still syncing, queue execution on a fresh isolated
++          // worktree instead of refusing the accept.
++          const forceFreshExecutionWorkspace = await creatingRunWorkspaceNeedsFreshWorktree({
++            db,
++            issue,
++            sourceRunId: current.sourceRunId,
++          });
+           const accepted = await acceptRequestConfirmation({
+             issue,
+             current,
+             input: data,
+             actor,
++            forceFreshExecutionWorkspace,
+           });
+           return {
+             interaction: accepted.interaction,
+@@ -1231,12 +1276,18 @@ export function issueThreadInteractionService(db: Db) {
+           };
+         }
+         case "request_checkbox_confirmation": {
+-          await assertIssueWorkspaceFinalizedForAccept({ db, issue, sourceRunId: current.sourceRunId });
++          // LAR-547: same decouple as request_confirmation above.
++          const forceFreshExecutionWorkspace = await creatingRunWorkspaceNeedsFreshWorktree({
++            db,
++            issue,
++            sourceRunId: current.sourceRunId,
++          });
+           const accepted = await acceptRequestConfirmation({
+             issue,
+             current,
+             input: data,
+             actor,
++            forceFreshExecutionWorkspace,
+           });
+           return {
+             interaction: accepted.interaction,
