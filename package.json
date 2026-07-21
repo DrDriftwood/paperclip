@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/link-plugin-dev-sdk.mjs",
+    "postinstall": "node scripts/link-plugin-dev-sdk.mjs && node scripts/fix-bun-native-symlinks.mjs",
     "preflight:workspace-links": "node cli/node_modules/tsx/dist/cli.mjs scripts/ensure-workspace-package-links.ts",
     "dev": "pnpm --filter @paperclipai/server exec tsx ../scripts/dev-runner.ts watch",
     "dev:watch": "pnpm --filter @paperclipai/server exec tsx ../scripts/dev-runner.ts watch",
@@ -74,24 +74,33 @@
     "node": ">=20"
   },
   "packageManager": "pnpm@9.15.4",
-  "pnpm": {
-    "patchedDependencies": {
-      "embedded-postgres@18.1.0-beta.16": "patches/embedded-postgres@18.1.0-beta.16.patch"
-    },
-    "overrides": {
-      "rollup": ">=4.59.0",
-      "react": "^19.2.7",
-      "react-dom": "^19.2.7",
-      "lexical": "0.46.0",
-      "@lexical/clipboard": "0.46.0",
-      "@lexical/link": "0.46.0",
-      "@lexical/list": "0.46.0",
-      "@lexical/markdown": "0.46.0",
-      "@lexical/plain-text": "0.46.0",
-      "@lexical/react": "0.46.0",
-      "@lexical/rich-text": "0.46.0",
-      "@lexical/selection": "0.46.0",
-      "@lexical/utils": "0.46.0"
-    }
-  }
+  "patchedDependencies": {
+    "embedded-postgres@18.1.0-beta.16": "patches/embedded-postgres@18.1.0-beta.16.patch"
+  },
+  "overrides": {
+    "rollup": ">=4.59.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "lexical": "0.46.0",
+    "@lexical/clipboard": "0.46.0",
+    "@lexical/link": "0.46.0",
+    "@lexical/list": "0.46.0",
+    "@lexical/markdown": "0.46.0",
+    "@lexical/plain-text": "0.46.0",
+    "@lexical/react": "0.46.0",
+    "@lexical/rich-text": "0.46.0",
+    "@lexical/selection": "0.46.0",
+    "@lexical/utils": "0.46.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "packages/adapters/*",
+    "packages/plugins/*",
+    "!packages/plugins/sandbox-providers/**",
+    "packages/plugins/examples/*",
+    "!packages/plugins/examples/plugin-orchestration-smoke-example",
+    "server",
+    "ui",
+    "cli"
+  ]
 }
