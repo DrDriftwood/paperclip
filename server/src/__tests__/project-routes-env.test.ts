@@ -1,6 +1,14 @@
 import express from "express";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const execFile = promisify(execFileCallback);
+const tempDirs: string[] = [];
 
 const mockProjectService = vi.hoisted(() => ({
   list: vi.fn(),
@@ -142,6 +150,10 @@ function buildProject(overrides: Record<string, unknown> = {}) {
 }
 
 describe("project env routes", () => {
+  afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
   beforeEach(() => {
     vi.resetModules();
     vi.doUnmock("../routes/projects.js");
@@ -229,5 +241,126 @@ describe("project env routes", () => {
         },
       }),
     );
+  });
+
+  it("rejects local workspace creation when the directory has no git metadata", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-no-git-"));
+    tempDirs.push(cwd);
+    mockProjectService.getById.mockResolvedValue(buildProject());
+
+    const app = await createApp();
+    const res = await request(app)
+      .post("/api/projects/project-1/workspaces")
+      .send({ sourceType: "local_path", cwd });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body).toMatchObject({
+      code: "workspace_cwd_missing_git_metadata",
+      details: {
+        code: "workspace_cwd_missing_git_metadata",
+        cwd,
+        sourceType: "local_path",
+        fix: `git -C "${cwd}" init && git -C "${cwd}" commit --allow-empty -m "init"`,
+        override: "Set allowMissingGit: true to bypass this check.",
+      },
+    });
+    expect(mockProjectService.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects local workspace creation when the directory does not exist", async () => {
+    const parent = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-missing-"));
+    tempDirs.push(parent);
+    const cwd = path.join(parent, "not-created");
+    mockProjectService.getById.mockResolvedValue(buildProject());
+
+    const app = await createApp();
+    const res = await request(app)
+      .post("/api/projects/project-1/workspaces")
+      .send({ sourceType: "local_path", cwd });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body).toMatchObject({
+      code: "workspace_cwd_not_found",
+      details: {
+        code: "workspace_cwd_not_found",
+        cwd,
+        sourceType: "local_path",
+        override: "Set allowMissingGit: true to bypass this check.",
+      },
+    });
+  });
+
+  it("creates local git workspaces and does not persist the validation override", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-git-"));
+    tempDirs.push(cwd);
+    await execFile("git", ["init", cwd]);
+    const workspace = { id: "workspace-1", name: "Workspace", cwd, sourceType: "local_path", isPrimary: true };
+    mockProjectService.getById.mockResolvedValue(buildProject());
+    mockProjectService.createWorkspace.mockResolvedValue(workspace);
+
+    const app = await createApp();
+    const res = await request(app)
+      .post("/api/projects/project-1/workspaces")
+      .send({ sourceType: "local_path", cwd });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockProjectService.createWorkspace).toHaveBeenCalledWith(
+      "project-1",
+      expect.not.objectContaining({ allowMissingGit: expect.anything() }),
+    );
+  });
+
+  it("allows missing git metadata when explicitly overridden", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-override-"));
+    tempDirs.push(cwd);
+    const workspace = { id: "workspace-1", name: "Workspace", cwd, sourceType: "local_path", isPrimary: true };
+    mockProjectService.getById.mockResolvedValue(buildProject());
+    mockProjectService.createWorkspace.mockResolvedValue(workspace);
+
+    const app = await createApp();
+    const res = await request(app)
+      .post("/api/projects/project-1/workspaces")
+      .send({ sourceType: "local_path", cwd, allowMissingGit: true });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(mockProjectService.createWorkspace).toHaveBeenCalledWith("project-1", { sourceType: "local_path", cwd });
+  });
+
+  it("does not apply local git validation to remote-managed workspaces", async () => {
+    const workspace = {
+      id: "workspace-1",
+      name: "Remote",
+      cwd: null,
+      sourceType: "remote_managed",
+      remoteWorkspaceRef: "remote-1",
+      isPrimary: true,
+    };
+    mockProjectService.getById.mockResolvedValue(buildProject());
+    mockProjectService.createWorkspace.mockResolvedValue(workspace);
+
+    const app = await createApp();
+    const res = await request(app)
+      .post("/api/projects/project-1/workspaces")
+      .send({ sourceType: "remote_managed", remoteWorkspaceRef: "remote-1" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+  });
+
+  it("validates the effective local workspace on update", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-workspace-patch-"));
+    tempDirs.push(cwd);
+    mockProjectService.getById.mockResolvedValue(buildProject());
+    mockProjectService.listWorkspaces.mockResolvedValue([
+      { id: "workspace-1", cwd, sourceType: "local_path" },
+    ]);
+
+    const app = await createApp();
+    const res = await request(app)
+      .patch("/api/projects/project-1/workspaces/workspace-1")
+      .send({ name: "Renamed" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.code).toBe("workspace_cwd_missing_git_metadata");
+    expect(mockProjectService.updateWorkspace).not.toHaveBeenCalled();
   });
 });

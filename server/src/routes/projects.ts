@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from "express";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import {
   createProjectSchema,
@@ -14,7 +16,7 @@ import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } fr
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
-import { conflict, forbidden } from "../errors.js";
+import { conflict, forbidden, unprocessable } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -36,9 +38,50 @@ import { appendWithCap } from "../adapters/utils.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { environmentService } from "../services/environments.js";
 import { secretService } from "../services/secrets.js";
+import { hasGitMetadata } from "../services/workspace-git.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
+
+function readNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+async function assertWorkspaceGitMetadata(input: {
+  cwd: unknown;
+  sourceType: unknown;
+  allowMissingGit: unknown;
+}) {
+  if (input.allowMissingGit === true) return;
+  const sourceType = readNonEmptyString(input.sourceType) ?? "local_path";
+  const cwd = readNonEmptyString(input.cwd);
+  if (sourceType === "remote_managed" || !cwd) return;
+
+  const resolvedCwd = path.resolve(cwd);
+  const override = "Set allowMissingGit: true to bypass this check.";
+  const exists = await fs
+    .stat(resolvedCwd)
+    .then((entry) => entry.isDirectory())
+    .catch(() => false);
+  if (!exists) {
+    throw unprocessable(`Workspace directory "${resolvedCwd}" does not exist.`, {
+      code: "workspace_cwd_not_found",
+      cwd: resolvedCwd,
+      sourceType,
+      fix: `mkdir -p "${resolvedCwd}" && git -C "${resolvedCwd}" init && git -C "${resolvedCwd}" commit --allow-empty -m "init"`,
+      override,
+    });
+  }
+  if (!await hasGitMetadata(resolvedCwd)) {
+    throw unprocessable(`Workspace directory "${resolvedCwd}" has no .git metadata.`, {
+      code: "workspace_cwd_missing_git_metadata",
+      cwd: resolvedCwd,
+      sourceType,
+      fix: `git -C "${resolvedCwd}" init && git -C "${resolvedCwd}" commit --allow-empty -m "init"`,
+      override,
+    });
+  }
+}
 
 export function projectRoutes(db: Db) {
   const router = Router();
@@ -309,7 +352,9 @@ export function projectRoutes(db: Db) {
       req,
       collectProjectWorkspaceCommandPaths(req.body),
     );
-    const workspace = await svc.createWorkspace(id, req.body);
+    await assertWorkspaceGitMetadata(req.body);
+    const { allowMissingGit: _allowMissingGit, ...workspaceInput } = req.body;
+    const workspace = await svc.createWorkspace(id, workspaceInput);
     if (!workspace) {
       res.status(422).json({ error: "Invalid project workspace payload" });
       return;
@@ -351,12 +396,18 @@ export function projectRoutes(db: Db) {
         req,
         collectProjectWorkspaceCommandPaths(req.body),
       );
-      const workspaceExists = (await svc.listWorkspaces(id)).some((workspace) => workspace.id === workspaceId);
-      if (!workspaceExists) {
+      const existingWorkspace = (await svc.listWorkspaces(id)).find((workspace) => workspace.id === workspaceId);
+      if (!existingWorkspace) {
         res.status(404).json({ error: "Project workspace not found" });
         return;
       }
-      const workspace = await svc.updateWorkspace(id, workspaceId, req.body);
+      await assertWorkspaceGitMetadata({
+        cwd: req.body.cwd !== undefined ? req.body.cwd : existingWorkspace.cwd,
+        sourceType: req.body.sourceType !== undefined ? req.body.sourceType : existingWorkspace.sourceType,
+        allowMissingGit: req.body.allowMissingGit,
+      });
+      const { allowMissingGit: _allowMissingGit, ...workspaceInput } = req.body;
+      const workspace = await svc.updateWorkspace(id, workspaceId, workspaceInput);
       if (!workspace) {
         res.status(422).json({ error: "Invalid project workspace payload" });
         return;

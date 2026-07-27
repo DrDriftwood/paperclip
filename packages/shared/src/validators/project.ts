@@ -86,6 +86,7 @@ function validateProjectWorkspace(value: Record<string, unknown>, ctx: z.Refinem
 export const createProjectWorkspaceSchema = z.object({
   ...projectWorkspaceFields,
   isPrimary: z.boolean().optional().default(false),
+  allowMissingGit: z.boolean().optional(),
 }).superRefine(validateProjectWorkspace);
 
 export type CreateProjectWorkspace = z.infer<typeof createProjectWorkspaceSchema>;
@@ -93,6 +94,7 @@ export type CreateProjectWorkspace = z.infer<typeof createProjectWorkspaceSchema
 export const updateProjectWorkspaceSchema = z.object({
   ...projectWorkspaceFields,
   isPrimary: z.boolean().optional(),
+  allowMissingGit: z.boolean().optional(),
 }).partial();
 
 export type UpdateProjectWorkspace = z.infer<typeof updateProjectWorkspaceSchema>;
