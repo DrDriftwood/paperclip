@@ -323,7 +323,11 @@ describe("project env routes", () => {
       .send({ sourceType: "local_path", cwd, allowMissingGit: true });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(mockProjectService.createWorkspace).toHaveBeenCalledWith("project-1", { sourceType: "local_path", cwd });
+    expect(mockProjectService.createWorkspace).toHaveBeenCalledWith("project-1", {
+      sourceType: "local_path",
+      cwd,
+      isPrimary: false,
+    });
   });
 
   it("does not apply local git validation to remote-managed workspaces", async () => {
