@@ -6,6 +6,7 @@ import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
 import { redactSensitive } from "./redact-sensitive.js";
+import { REDACTED_LOG_HEADER_PATHS } from "./redacted-log-headers.js";
 
 function resolveServerLogDir(): string {
   const envOverride = process.env.PAPERCLIP_LOG_DIR?.trim();
@@ -30,7 +31,7 @@ const sharedOpts = {
 
 export const logger = pino({
   level: "debug",
-  redact: ["req.headers.authorization"],
+  redact: REDACTED_LOG_HEADER_PATHS,
 }, pino.transport({
   targets: [
     {

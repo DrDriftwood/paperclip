@@ -11,41 +11,41 @@
 // objects/arrays. Caps depth so a hostile or accidental cycle can't pin
 // the logger.
 
+// Keys are matched after normalization (lower-cased, `-`/`_`/spaces stripped),
+// so a single entry covers `access_token`, `accessToken` and `access-token`.
+// The dashed form matters because header bags reach this walker via adapter
+// config bodies, where the key really is `set-cookie`.
 const SENSITIVE_KEYS = new Set<string>([
   "password",
   "currentpassword",
   "newpassword",
   "passwordconfirmation",
-  "password_confirmation",
   "passwordconfirm",
-  "password_confirm",
   "confirmpassword",
-  "confirm_password",
   "secret",
-  "client_secret",
   "clientsecret",
-  "access_token",
   "accesstoken",
-  "refresh_token",
   "refreshtoken",
-  "id_token",
   "idtoken",
-  "api_key",
   "apikey",
   "authorization",
-  "auth_token",
+  "proxyauthorization",
+  "cookie",
+  "setcookie",
   "authtoken",
-  "session_token",
   "sessiontoken",
-  "private_key",
   "privatekey",
-]);
+].map(normalizeKey));
 
 const MAX_DEPTH = 6;
 const REDACTED = "[REDACTED]";
 
+function normalizeKey(key: string): string {
+  return key.toLowerCase().replace(/[-_\s]/g, "");
+}
+
 function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_KEYS.has(key.toLowerCase());
+  return SENSITIVE_KEYS.has(normalizeKey(key));
 }
 
 export function redactSensitive(value: unknown, depth = 0): unknown {

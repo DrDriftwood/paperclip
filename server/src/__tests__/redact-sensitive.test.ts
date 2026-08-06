@@ -32,6 +32,30 @@ describe("redactSensitive", () => {
     }
   });
 
+  it("redacts cookie headers carried inside a body — LAR-928", () => {
+    const out = redactSensitive({
+      url: "https://example.test/hook",
+      headers: { cookie: "sess=abc", "set-cookie": "sess=abc; HttpOnly" },
+    }) as Record<string, Record<string, unknown>>;
+
+    expect(out.url).toBe("https://example.test/hook");
+    expect(out.headers.cookie).toBe("[REDACTED]");
+    expect(out.headers["set-cookie"]).toBe("[REDACTED]");
+  });
+
+  it("matches credential keys across snake_case, camelCase and kebab-case spellings", () => {
+    const out = redactSensitive({
+      access_token: "a",
+      accessToken: "b",
+      "access-token": "c",
+      "proxy-authorization": "d",
+    }) as Record<string, string>;
+
+    for (const value of Object.values(out)) {
+      expect(value).toBe("[REDACTED]");
+    }
+  });
+
   it("does not redact a bare `token` field — pagination cursors and CSRF tokens are not credentials", () => {
     const out = redactSensitive({ token: "next-page-cursor", limit: 20 }) as Record<string, unknown>;
 
