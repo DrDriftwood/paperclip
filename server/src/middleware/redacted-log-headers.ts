@@ -31,6 +31,11 @@ const REDACTED_HEADER_NAMES = [
   "x-openclaw-token",
   "x-openclaw-auth",
   "x-hermes-session-key",
+  // Bearer-style tokens read straight off the incoming request elsewhere in
+  // the server; without these the raw token would land in the request log.
+  // See server/src/routes/health.ts and server/src/middleware/auth.ts.
+  "x-paperclip-dev-server-status-token",
+  "x-paperclip-cloud-tenant-token",
   // Cloud provider session credentials that can ride on proxied requests.
   "x-amz-security-token",
 ] as const;
