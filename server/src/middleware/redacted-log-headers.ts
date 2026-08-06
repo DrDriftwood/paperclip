@@ -38,6 +38,11 @@ const REDACTED_HEADER_NAMES = [
   "x-paperclip-cloud-tenant-token",
   // Cloud provider session credentials that can ride on proxied requests.
   "x-amz-security-token",
+  // Webhook HMAC signatures read off inbound requests. These are shared-secret
+  // derived MACs; logging them raw is a credential-shaped leak.
+  // See server/src/routes/routines.ts.
+  "x-paperclip-signature",
+  "x-hub-signature-256",
 ] as const;
 
 function headerPath(root: "req" | "res", name: string): string {
