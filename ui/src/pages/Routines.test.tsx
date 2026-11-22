@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
 
-import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { useState, type AnchorHTMLAttributes, type ComponentProps, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Issue, RoutineListItem } from "@paperclipai/shared";
+import type { FolderListResult, Issue, RoutineListItem } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Routines, buildRoutineGroups, buildRoutineSections, sortRoutines } from "./Routines";
+import { queryKeys } from "../lib/queryKeys";
+import type { RequestOptions } from "../api/client";
+import { Routines, buildRoutineGroups, buildRoutineSections } from "./Routines";
+import { Routines as CurrentRoutines } from "./Routines.production";
+import { sortRoutines } from "../lib/routine-list-data";
+import { routinesApi } from "../api/routines";
+import { accessApi } from "../api/access";
 
 let currentSearch = "";
 
@@ -20,13 +26,17 @@ async function act(callback: () => void | Promise<void>) {
 
 const navigateMock = vi.fn();
 const routinesListMock = vi.fn<(companyId: string) => Promise<RoutineListItem[]>>();
+const foldersListMock = vi.fn<(companyId: string, kind: string, options?: RequestOptions) => Promise<FolderListResult>>();
 const issuesListMock = vi.fn<(companyId: string, filters?: Record<string, unknown>) => Promise<Issue[]>>();
 const markdownEditorRenderMock = vi.fn((props: { mentions?: Array<{ id: string; name: string }> }) => props);
 const issuesListRenderMock = vi.fn(({ issues }: { issues: Issue[] }) => (
   <div data-testid="issues-list">{issues.map((issue) => issue.title).join(", ")}</div>
 ));
+const inlineEntitySelectorRenderMock = vi.fn((props: { options?: Array<{ id: string }> }) => props);
+const pickerMode = vi.hoisted(() => ({ real: false }));
 
 vi.mock("@/lib/router", () => ({
+  Navigate: ({ to }: { to: string }) => <a data-redirect href={to}>Redirect</a>,
   Link: ({ to, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; children: ReactNode }) => (
     <a href={to} {...props}>
       {children}
@@ -34,7 +44,13 @@ vi.mock("@/lib/router", () => ({
   ),
   useNavigate: () => navigateMock,
   useLocation: () => ({ pathname: "/routines", search: currentSearch ? `?${currentSearch}` : "", hash: "" }),
-  useSearchParams: () => [new URLSearchParams(currentSearch), vi.fn()],
+  useSearchParams: () => {
+    const [, rerender] = useState(0);
+    return [new URLSearchParams(currentSearch), (update: URLSearchParams | ((params: URLSearchParams) => URLSearchParams)) => {
+      currentSearch = (typeof update === "function" ? update(new URLSearchParams(currentSearch)) : update).toString();
+      rerender(count => count + 1);
+    }];
+  },
 }));
 
 vi.mock("../context/CompanyContext", () => ({
@@ -49,12 +65,24 @@ vi.mock("../context/ToastContext", () => ({
   useToastActions: () => ({ pushToast: vi.fn() }),
 }));
 
+vi.mock("../api/auth", () => ({ authApi: { getSession: vi.fn(async () => ({ user: { id: "user-1" } })) } }));
+
 vi.mock("../api/routines", () => ({
   routinesApi: {
     list: (companyId: string) => routinesListMock(companyId),
     create: vi.fn(),
     update: vi.fn(),
     run: vi.fn(),
+  },
+}));
+
+vi.mock("../api/folders", () => ({
+  foldersApi: {
+    list: (companyId: string, kind: string, options?: RequestOptions) => foldersListMock(companyId, kind, options),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    moveItem: vi.fn(),
   },
 }));
 
@@ -169,6 +197,29 @@ vi.mock("../api/projects", () => ({
         createdAt: new Date("2026-04-01T00:00:00.000Z"),
         updatedAt: new Date("2026-04-01T00:00:00.000Z"),
       },
+      {
+        id: "project-archived",
+        companyId: "company-1",
+        urlKey: "project-archived",
+        goalId: null,
+        goalIds: [],
+        goals: [],
+        name: "Archived Project",
+        description: null,
+        status: "completed",
+        leadAgentId: null,
+        targetDate: null,
+        color: "#94a3b8",
+        pauseReason: null,
+        pausedAt: null,
+        archivedAt: new Date("2026-04-02T00:00:00.000Z"),
+        executionWorkspacePolicy: null,
+        codebase: null,
+        workspaces: [],
+        primaryWorkspace: null,
+        createdAt: new Date("2026-04-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-01T00:00:00.000Z"),
+      },
     ]),
   },
 }));
@@ -189,6 +240,10 @@ vi.mock("../api/access", () => ({
       ],
     })),
   },
+}));
+
+vi.mock("../api/secrets", () => ({
+  secretsApi: { list: vi.fn(async () => []), create: vi.fn() },
 }));
 
 vi.mock("../api/instanceSettings", () => ({
@@ -225,9 +280,14 @@ vi.mock("../components/MarkdownEditor", () => ({
   },
 }));
 
-vi.mock("../components/InlineEntitySelector", () => ({
-  InlineEntitySelector: () => <button type="button">selector</button>,
-}));
+vi.mock("../components/InlineEntitySelector", async importOriginal => {
+  const actual = await importOriginal<typeof import("../components/InlineEntitySelector")>();
+  const { forwardRef } = await import("react");
+  return { InlineEntitySelector: forwardRef<HTMLButtonElement, ComponentProps<typeof actual.InlineEntitySelector>>((props, ref) => {
+    inlineEntitySelectorRenderMock(props);
+    return pickerMode.real ? <actual.InlineEntitySelector {...props} ref={ref} /> : <button type="button">selector</button>;
+  }) };
+});
 
 vi.mock("../components/RoutineRunVariablesDialog", () => ({
   RoutineRunVariablesDialog: () => null,
@@ -261,6 +321,8 @@ function createRoutine(overrides: Partial<RoutineListItem>): RoutineListItem {
     status: "active",
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
+    activityGatePolicy: "always",
+    activityGateScope: "company",
     variables: [],
     latestRevisionId: null,
     latestRevisionNumber: 1,
@@ -275,6 +337,7 @@ function createRoutine(overrides: Partial<RoutineListItem>): RoutineListItem {
     triggers: [],
     lastRun: null,
     activeIssue: null,
+    folderId: null,
     ...overrides,
   };
 }
@@ -292,6 +355,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     description: null,
     status: "todo",
     priority: "medium",
+    reviewPolicy: null,
     assigneeAgentId: "agent-1",
     assigneeUserId: null,
     responsibleUserId: null,
@@ -338,14 +402,23 @@ describe("Routines page", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    pickerMode.real = false;
     container = document.createElement("div");
     document.body.appendChild(container);
     currentSearch = "";
     navigateMock.mockReset();
     routinesListMock.mockReset();
+    foldersListMock.mockReset();
+    foldersListMock.mockResolvedValue({
+      kind: "routine",
+      folders: [],
+      allCount: 0,
+      unfiledCount: 0,
+    });
     issuesListMock.mockReset();
     markdownEditorRenderMock.mockClear();
     issuesListRenderMock.mockClear();
+    inlineEntitySelectorRenderMock.mockClear();
     localStorage.clear();
   });
 
@@ -369,6 +442,7 @@ describe("Routines page", () => {
         ["agent-1", { name: "Agent One" }],
         ["agent-2", { name: "Agent Two" }],
       ]),
+      new Map(),
     );
 
     expect(groups.map((group) => group.label)).toEqual(["Project Alpha", "Project Beta"]);
@@ -391,11 +465,79 @@ describe("Routines page", () => {
       "project",
       new Map([["project-1", { name: "Project Alpha" }]]),
       new Map([["agent-1", { name: "Agent One" }]]),
+      new Map(),
     );
 
     expect(groups.map((group) => group.label)).toEqual(["Project Alpha", "Built-in routines"]);
     expect(groups[0]?.items.map((item) => item.title)).toEqual(["Morning sync"]);
     expect(groups[1]?.items.map((item) => item.title)).toEqual(["Reflection review"]);
+  });
+
+  it("groups routines by folder using folder names and Unfiled labels", () => {
+    const groups = buildRoutineGroups(
+      [
+        createRoutine({ id: "routine-1", title: "RPI review", folderId: "folder-rpi" }),
+        createRoutine({ id: "routine-2", title: "Unfiled sweep", folderId: null }),
+        createRoutine({ id: "routine-3", title: "Test summary", folderId: "folder-test" }),
+      ],
+      "folder",
+      new Map(),
+      new Map(),
+      new Map([
+        ["folder-rpi", { name: "RPI" }],
+        ["folder-test", { name: "Test" }],
+      ]),
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["RPI", "Test", "Unfiled"]);
+    expect(groups[0]?.items.map((item) => item.title)).toEqual(["RPI review"]);
+    expect(groups[1]?.items.map((item) => item.title)).toEqual(["Test summary"]);
+    expect(groups[2]?.items.map((item) => item.title)).toEqual(["Unfiled sweep"]);
+  });
+
+  it("orders folder groups by folder position before label and keeps Unfiled after folders", () => {
+    const groups = buildRoutineGroups(
+      [
+        createRoutine({ id: "routine-1", title: "Beta routine", folderId: "folder-beta" }),
+        createRoutine({ id: "routine-2", title: "Loose routine", folderId: null }),
+        createRoutine({ id: "routine-3", title: "Alpha routine", folderId: "folder-alpha" }),
+      ],
+      "folder",
+      new Map(),
+      new Map(),
+      new Map([
+        ["folder-alpha", { name: "Alpha", position: 20 }],
+        ["folder-beta", { name: "Beta", position: 10 }],
+      ]),
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["Beta", "Alpha", "Unfiled"]);
+    expect(groups.map((group) => group.key)).toEqual(["folder-beta", "folder-alpha", "__unfiled"]);
+  });
+
+  it("keeps built-in routines in their own section after folder groups", () => {
+    const groups = buildRoutineSections(
+      [
+        createRoutine({ id: "routine-1", title: "RPI review", folderId: "folder-rpi" }),
+        createRoutine({
+          id: "routine-2",
+          title: "Reflection review",
+          folderId: "folder-rpi",
+          originKind: "built_in_agent_bundle",
+          originId: "reflection-coach:recent-agent-reflection",
+        }),
+        createRoutine({ id: "routine-3", title: "Unfiled sweep", folderId: null }),
+      ],
+      "folder",
+      new Map(),
+      new Map(),
+      new Map([["folder-rpi", { name: "RPI" }]]),
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["RPI", "Unfiled", "Built-in routines"]);
+    expect(groups[0]?.items.map((item) => item.title)).toEqual(["RPI review"]);
+    expect(groups[1]?.items.map((item) => item.title)).toEqual(["Unfiled sweep"]);
+    expect(groups[2]?.items.map((item) => item.title)).toEqual(["Reflection review"]);
   });
 
   it("sorts routines by selected field and direction without mutating the source list", () => {
@@ -489,11 +631,221 @@ describe("Routines page", () => {
     });
   });
 
-  it("defaults the routines list to project groups sorted by title", async () => {
+  it("reveals routines with their folder navigation after a delayed folder read", async () => {
+    routinesListMock.mockResolvedValue([createRoutine({ title: "Delayed folder routine", folderId: "folder-1" })]);
+    let resolveFolders!: (result: FolderListResult) => void;
+    foldersListMock.mockReturnValue(new Promise((resolve) => { resolveFolders = resolve; }));
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Routines /></QueryClientProvider>);
+      await flush();
+    });
+    await act(async () => { await flush(); });
+    expect(container.textContent).not.toContain("Delayed folder routine");
+
+    await act(async () => {
+      resolveFolders({
+        kind: "routine", allCount: 1, unfiledCount: 0,
+        folders: [{
+          id: "folder-1", companyId: "company-1", kind: "routine", parentId: null,
+          name: "Reporting", slug: "reporting", systemKey: null, path: "reporting",
+          depth: 1, color: "indigo", position: 0, itemCount: 1,
+          createdAt: new Date(), updatedAt: new Date(),
+        }],
+      });
+      await flush();
+    });
+    await act(async () => { await flush(); });
+    expect(container.textContent).toContain("Delayed folder routine");
+    expect(container.querySelector('nav[aria-label="routines folders"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Unknown folder");
+
+    const folderKey = queryKeys.folders.list("company-1", "routine");
+    const cachedFolders = queryClient.getQueryData<FolderListResult>(folderKey)!;
+    const routineLink = container.querySelector('a[href="/routines/routine-1"]');
+    let resolveRefresh!: (result: FolderListResult) => void;
+    foldersListMock.mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+    await act(async () => {
+      void queryClient.invalidateQueries({ queryKey: folderKey });
+      await flush();
+    });
+    expect(container.textContent).toContain("Delayed folder routine");
+    expect(container.querySelector('a[href="/routines/routine-1"]')).toBe(routineLink);
+    await act(async () => { resolveRefresh(cachedFolders); await flush(); });
+    foldersListMock.mockRejectedValueOnce(new Error("Folder refresh failed"));
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: folderKey });
+      await flush();
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector('a[href="/routines/routine-1"]')).toBe(routineLink);
+    expect(container.querySelector('nav[aria-label="routines folders"]')).not.toBeNull();
+    expect(container.textContent).toContain("Reporting");
+    expect(container.textContent).not.toContain("Unknown folder");
+    await act(async () => { root.unmount(); });
+  });
+
+  it.each(["all", "folder-1", "unfiled"])("keeps routines readable after a folder read fails, then restores the %s filter on retry", async (selection) => {
+    currentSearch = selection === "all" ? "" : `folder=${selection}`;
     routinesListMock.mockResolvedValue([
-      createRoutine({ id: "routine-1", title: "Weekly digest", projectId: "project-1" }),
-      createRoutine({ id: "routine-2", title: "Morning sync", projectId: "project-1" }),
-      createRoutine({ id: "routine-3", title: "Agent review", projectId: "project-2" }),
+      createRoutine({ title: "Filed routine", folderId: "folder-1" }),
+      createRoutine({ id: "routine-2", title: "Loose routine", folderId: null }),
+    ]);
+    foldersListMock.mockRejectedValueOnce(new Error("Folder read failed"));
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    try {
+      await act(async () => {
+        root.render(<QueryClientProvider client={queryClient}><Routines /></QueryClientProvider>);
+        await flush();
+      });
+      await act(async () => { await flush(); });
+      expect(container.textContent).toContain("Filed routine");
+      expect(container.textContent).toContain("Loose routine");
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Unknown folder");
+      expect(container.textContent).not.toContain("Create your first folder");
+      expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent === "New folder")).toBe(false);
+      expect(container.textContent).not.toContain("All routines");
+
+      foldersListMock.mockResolvedValue({
+        kind: "routine", allCount: 2, unfiledCount: 1,
+        folders: [{
+          id: "folder-1", companyId: "company-1", kind: "routine", parentId: null,
+          name: "Reporting", slug: "reporting", systemKey: null, path: "reporting",
+          depth: 1, color: "indigo", position: 0, itemCount: 1,
+          createdAt: new Date(), updatedAt: new Date(),
+        }],
+      });
+      const retry = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Retry");
+      expect(retry).toBeTruthy();
+      await act(async () => { retry!.click(); await flush(); });
+      await act(async () => { await flush(); });
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.querySelector('nav[aria-label="routines folders"]')).not.toBeNull();
+      expect(container.textContent).toContain("Reporting");
+      if (selection === "unfiled") {
+        expect(container.textContent).not.toContain("Filed routine");
+      } else {
+        expect(container.textContent).toContain("Filed routine");
+      }
+      if (selection === "folder-1") {
+        expect(container.textContent).not.toContain("Loose routine");
+      } else {
+        expect(container.textContent).toContain("Loose routine");
+      }
+    } finally {
+      await act(() => root.unmount());
+      queryClient.clear();
+    }
+  });
+
+  it.each([["classic", Routines], ["current", CurrentRoutines]] as const)("keeps %s routines readable when the people directory fails and restores names on retry", async (_variant, Page) => {
+    routinesListMock.mockResolvedValue([createRoutine({ title: "Owned routine", responsibleUserId: "user-1" })]);
+    vi.mocked(accessApi.listUserDirectory).mockRejectedValueOnce(new Error("Could not load responsible people"));
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    try {
+      await act(async () => {
+        root.render(<QueryClientProvider client={queryClient}><Page /></QueryClientProvider>);
+        await flush();
+      });
+      await act(async () => { await flush(); });
+      const routineLink = container.querySelector('a[href="/routines/routine-1"]');
+      expect(routineLink).not.toBeNull();
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert?.textContent).toContain("Could not load responsible people");
+      const retry = alert?.querySelector("button");
+      expect(retry?.textContent).toBe("Retry");
+      await act(async () => { retry!.click(); await flush(); });
+      await act(async () => { await flush(); });
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.querySelector('a[href="/routines/routine-1"]')).toBe(routineLink);
+      expect(container.textContent).toContain("Taylor");
+    } finally {
+      await act(() => root.unmount());
+      queryClient.clear();
+    }
+  });
+
+  it("bounds a stalled folder request and leaves routines accessible with a retry", async () => {
+    const actual = await vi.importActual<typeof import("../api/folders")>("../api/folders");
+    routinesListMock.mockResolvedValue([createRoutine({ title: "Accessible after timeout", folderId: "folder-1" })]);
+    foldersListMock.mockImplementation((companyId, _kind, options) => actual.foldersApi.list(companyId, "routine", options));
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      await act(() => root.render(<QueryClientProvider client={queryClient}><Routines /></QueryClientProvider>));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(container.textContent).not.toContain("Accessible after timeout");
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(container.textContent).toContain("Accessible after timeout");
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(container.textContent).toContain("Retry");
+      expect(container.textContent).not.toContain("Unknown folder");
+      expect(container.textContent).not.toContain("Create your first folder");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    } finally {
+      await act(() => root.unmount());
+      queryClient.clear();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("defaults the routines list to folder mode with inline folder sections", async () => {
+    foldersListMock.mockResolvedValue({
+      kind: "routine",
+      allCount: 3,
+      unfiledCount: 1,
+      folders: [
+        {
+          id: "folder-rpi",
+          companyId: "company-1",
+          kind: "routine",
+          parentId: null,
+          name: "RPI",
+          slug: "rpi",
+          systemKey: null,
+          path: "rpi",
+          depth: 1,
+          color: null,
+          position: 0,
+          itemCount: 1,
+          createdAt: new Date("2026-07-01T00:00:00.000Z"),
+          updatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        },
+        {
+          id: "folder-test",
+          companyId: "company-1",
+          kind: "routine",
+          parentId: null,
+          name: "Test",
+          slug: "test",
+          systemKey: null,
+          path: "test",
+          depth: 1,
+          color: null,
+          position: 1,
+          itemCount: 1,
+          createdAt: new Date("2026-07-01T00:00:00.000Z"),
+          updatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        },
+      ],
+    });
+    routinesListMock.mockResolvedValue([
+      createRoutine({ id: "routine-1", title: "RPI review", folderId: "folder-rpi", projectId: "project-1" }),
+      createRoutine({ id: "routine-2", title: "Unfiled sweep", folderId: null, projectId: "project-1" }),
+      createRoutine({ id: "routine-3", title: "Test summary", folderId: "folder-test", projectId: "project-2" }),
     ]);
     issuesListMock.mockResolvedValue([]);
 
@@ -513,17 +865,19 @@ describe("Routines page", () => {
       await flush();
     });
 
-    for (let attempts = 0; attempts < 5 && !container.textContent?.includes("Project Alpha"); attempts += 1) {
+    for (let attempts = 0; attempts < 5 && !container.textContent?.includes("Unfiled sweep"); attempts += 1) {
       await act(async () => {
         await flush();
       });
     }
 
+    const sectionLabels = Array.from(container.querySelectorAll("[data-routine-section-label]"))
+      .map((element) => element.textContent);
+    expect(sectionLabels).toEqual(["RPI", "Test", "Unfiled"]);
+
     const text = container.textContent ?? "";
-    expect(text.indexOf("Project Alpha")).toBeLessThan(text.indexOf("Project Beta"));
-    expect(text.indexOf("Morning sync")).toBeLessThan(text.indexOf("Weekly digest"));
-    expect(text.indexOf("Project Alpha")).toBeLessThan(text.indexOf("Morning sync"));
-    expect(text.indexOf("Weekly digest")).toBeLessThan(text.indexOf("Project Beta"));
+    expect(text.indexOf("RPI review")).toBeLessThan(text.indexOf("Test summary"));
+    expect(text.indexOf("Test summary")).toBeLessThan(text.indexOf("Unfiled sweep"));
 
     await act(async () => {
       root.unmount();
@@ -546,7 +900,6 @@ describe("Routines page", () => {
       }),
     ]);
     issuesListMock.mockResolvedValue([]);
-
     const root = createRoot(container);
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -570,12 +923,114 @@ describe("Routines page", () => {
     }
 
     const text = container.textContent ?? "";
-    expect(text.indexOf("Project Alpha")).toBeLessThan(text.indexOf("Morning sync"));
     expect(text.indexOf("Morning sync")).toBeLessThan(text.indexOf("Built-in routines"));
     expect(text.indexOf("Built-in routines")).toBeLessThan(text.indexOf("Reflection review"));
 
     await act(async () => {
       root.unmount();
+    });
+  });
+
+  it("filters to Unfiled and shows the empty-folder state with a create CTA", async () => {
+    foldersListMock.mockResolvedValue({
+      kind: "routine",
+      allCount: 2,
+      unfiledCount: 1,
+      folders: [
+        {
+          id: "folder-reporting",
+          companyId: "company-1",
+          kind: "routine",
+          parentId: null,
+          name: "Reporting",
+          slug: "reporting",
+          systemKey: null,
+          path: "reporting",
+          depth: 1,
+          color: "#6366f1",
+          position: 0,
+          itemCount: 1,
+          createdAt: new Date("2026-07-01T00:00:00.000Z"),
+          updatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        },
+        {
+          id: "folder-empty",
+          companyId: "company-1",
+          kind: "routine",
+          parentId: null,
+          name: "Empty folder",
+          slug: "empty-folder",
+          systemKey: null,
+          path: "empty-folder",
+          depth: 1,
+          color: null,
+          position: 1,
+          itemCount: 0,
+          createdAt: new Date("2026-07-01T00:00:00.000Z"),
+          updatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        },
+      ],
+    });
+    routinesListMock.mockResolvedValue([
+      createRoutine({ id: "routine-1", title: "Filed digest", folderId: "folder-reporting" }),
+      createRoutine({ id: "routine-2", title: "Loose routine", folderId: null }),
+    ]);
+    issuesListMock.mockResolvedValue([]);
+
+    currentSearch = "folder=unfiled";
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Routines />
+        </QueryClientProvider>,
+      );
+      await flush();
+    });
+    for (let attempts = 0; attempts < 5 && !container.textContent?.includes("Loose routine"); attempts += 1) {
+      await act(async () => {
+        await flush();
+      });
+    }
+
+    // Unfiled filter: only the folderless routine renders; the rail still lists folders.
+    expect(container.textContent).toContain("Loose routine");
+    expect(container.textContent).not.toContain("Filed digest");
+    expect(container.textContent).toContain("Reporting");
+    expect(container.textContent).toContain("Empty folder");
+
+    await act(async () => {
+      root.unmount();
+    });
+
+    // Remount filtered to the empty folder: empty state + create-into-folder CTA.
+    currentSearch = "folder=folder-empty";
+    const secondRoot = createRoot(container);
+    await act(async () => {
+      secondRoot.render(
+        <QueryClientProvider client={queryClient}>
+          <Routines />
+        </QueryClientProvider>,
+      );
+      await flush();
+    });
+    for (let attempts = 0; attempts < 5 && !container.textContent?.includes("This folder is empty"); attempts += 1) {
+      await act(async () => {
+        await flush();
+      });
+    }
+
+    expect(container.textContent).toContain("This folder is empty");
+    expect(container.textContent).toContain("New routine in this folder");
+
+    await act(async () => {
+      secondRoot.unmount();
     });
   });
 
@@ -609,9 +1064,59 @@ describe("Routines page", () => {
     }
 
     const text = container.textContent ?? "";
-    expect(text).toContain("1 routine");
     expect(text).toContain("Morning sync");
     expect(text).not.toContain("Archived cleanup");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("searches routine titles and descriptions and restores results when cleared", async () => {
+    routinesListMock.mockResolvedValue([
+      createRoutine({ id: "routine-1", title: "Morning sync", status: "active" }),
+      createRoutine({ id: "routine-2", title: "Weekly digest", description: "Review company activity", status: "active" }),
+    ]);
+    issuesListMock.mockResolvedValue([]);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Routines />
+        </QueryClientProvider>,
+      );
+      await flush();
+    });
+
+    for (let attempts = 0; attempts < 5 && !container.textContent?.includes("Morning sync"); attempts += 1) {
+      await act(async () => {
+        await flush();
+      });
+    }
+
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Search routines"]')!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    async function search(value: string) {
+      await act(async () => {
+        setValue.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+    await search("company review");
+    expect(container.textContent).toContain("Weekly digest");
+    expect(container.textContent).not.toContain("Morning sync");
+    await search("missing");
+    expect(container.textContent).toContain("No routines match your search.");
+    await search("");
+    expect(container.textContent).toContain("Weekly digest");
+    expect(container.textContent).toContain("Morning sync");
 
     await act(async () => {
       root.unmount();
@@ -639,19 +1144,104 @@ describe("Routines page", () => {
     });
 
     let runNowButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Run now"),
+      button.getAttribute("aria-label") === "Run now: Morning sync",
     );
     for (let attempts = 0; attempts < 5 && !runNowButton; attempts += 1) {
       await act(async () => {
         await flush();
       });
       runNowButton = Array.from(container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("Run now"),
+        button.getAttribute("aria-label") === "Run now: Morning sync",
       );
     }
 
     expect(runNowButton).toBeTruthy();
     expect(runNowButton?.getAttribute("data-variant")).toBe("outline");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("creates a routine from the shared routine form and opens its page", async () => {
+    routinesListMock.mockResolvedValue([]);
+    issuesListMock.mockResolvedValue([]);
+    vi.mocked(routinesApi.create).mockResolvedValue({ id: "routine-new", responsibleUserId: null } as Awaited<ReturnType<typeof routinesApi.create>>);
+    const root = createRoot(container), queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const buttons = (text: string) => Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .filter(element => element.textContent?.trim() === text);
+    try {
+      await act(async () => { root.render(<QueryClientProvider client={queryClient}><Routines /></QueryClientProvider>); await flush(); });
+      await vi.waitFor(() => expect(buttons("New routine").length).toBeGreaterThan(0));
+      await act(async () => { buttons("New routine")[0]!.click(); await flush(); });
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+      expect(dialog?.textContent).toContain("New routine");
+      const title = dialog!.querySelector<HTMLInputElement>("input[placeholder='Send the weekly digest']")!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(title, "Weekly digest");
+        title.dispatchEvent(new Event("input", { bubbles: true }));
+        await flush();
+      });
+      const submit = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button")).find(element => element.textContent?.trim() === "Create routine")!;
+      await act(async () => { submit.click(); await flush(); });
+      await vi.waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/routines/routine-new"));
+      expect(routinesApi.create).toHaveBeenCalledWith("company-1", expect.objectContaining({
+        title: "Weekly digest",
+        description: null,
+        assigneeAgentId: null,
+        projectId: null,
+      }));
+      // Delivery settings and priority have no editor: new routines take the server defaults.
+      const payload = vi.mocked(routinesApi.create).mock.calls[0]![1];
+      expect(payload).not.toHaveProperty("concurrencyPolicy");
+      expect(payload).not.toHaveProperty("priority");
+    } finally { await act(() => root.unmount()); queryClient.clear(); }
+  });
+
+  it("excludes archived projects from the create composer project selector", async () => {
+    routinesListMock.mockResolvedValue([]);
+    issuesListMock.mockResolvedValue([]);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Routines />
+        </QueryClientProvider>,
+      );
+      await flush();
+    });
+
+    let createButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("New routine"),
+    );
+    for (let attempts = 0; attempts < 5 && !createButton; attempts += 1) {
+      await act(async () => {
+        await flush();
+      });
+      createButton = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("New routine"),
+      );
+    }
+
+    await act(async () => {
+      createButton?.click();
+      await flush();
+    });
+
+    const projectSelectorCall = inlineEntitySelectorRenderMock.mock.calls.find(([props]) => {
+      const ids = (props.options ?? []).map((option) => option.id);
+      return ids.includes("project-1") && ids.includes("project-2");
+    });
+
+    expect(projectSelectorCall).toBeTruthy();
+    expect(projectSelectorCall?.[0].options?.map((option) => option.id)).toEqual(["project-1", "project-2"]);
 
     await act(async () => {
       root.unmount();
@@ -679,14 +1269,14 @@ describe("Routines page", () => {
     });
 
     let createButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Create routine"),
+      button.textContent?.includes("New routine"),
     );
     for (let attempts = 0; attempts < 5 && !createButton; attempts += 1) {
       await act(async () => {
         await flush();
       });
       createButton = Array.from(container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("Create routine"),
+        button.textContent?.includes("New routine"),
       );
     }
 
@@ -722,13 +1312,63 @@ describe("Routines page", () => {
     });
   });
 
-  it("shows recent runs through the issues list scoped to routine execution issues", async () => {
+  it("opens linked filters and restores saved columns with responsible people beside agents", async () => {
+    currentSearch = "projects=project-1&responsibleUsers=user-1&statuses=active";
+    localStorage.setItem("paperclip:routines-view:company-1:user:user-1", JSON.stringify({
+      projects: ["project-2"], columns: ["assignee", "responsibleUser"], groupBy: "none",
+    }));
+    routinesListMock.mockResolvedValue([
+      createRoutine({ id: "match", title: "Linked routine", responsibleUserId: "user-1" }),
+      createRoutine({ id: "other", title: "Other routine", projectId: "project-2", responsibleUserId: "user-1" }),
+      createRoutine({ id: "paused", title: "Paused routine", status: "paused", responsibleUserId: "user-1" }),
+    ]);
+    const root = createRoot(container);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      await act(async () => { root.render(<QueryClientProvider client={client}><Routines /></QueryClientProvider>); await flush(); });
+      await vi.waitFor(() => expect(container.textContent).toContain("Linked routine"));
+      const rows = container.querySelectorAll('[role="row"]');
+      expect(container.textContent).not.toContain("Other routine");
+      expect(container.textContent).not.toContain("Paused routine");
+      expect(Array.from(rows[0].querySelectorAll('[role="columnheader"]'), cell => cell.textContent)).toEqual(["Routine", "Agent", "Responsible user", "Actions"]);
+      expect(rows[1].textContent).toContain("Agent One");
+      expect(rows[1].textContent).toContain("Taylor");
+      expect(rows[1].querySelector('a[href="/routines/match"]')?.textContent).toBe("Linked routine");
+      expect(rows[1].querySelector('button[aria-label="Run now: Linked routine"]')?.textContent).toBe("");
+    } finally { await act(() => root.unmount()); client.clear(); }
+  });
+
+  it("shows a filtered empty state when the enabled filter excludes all routines", async () => {
+    currentSearch = "statuses=paused";
+    routinesListMock.mockResolvedValue([createRoutine({ status: "active" })]);
+    const root = createRoot(container);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      await act(async () => { root.render(<QueryClientProvider client={client}><Routines /></QueryClientProvider>); await flush(); });
+      await vi.waitFor(() => expect(container.textContent).toContain("No routines match this view."));
+      expect(container.textContent).not.toContain("define the first recurring workflow");
+    } finally { await act(() => root.unmount()); client.clear(); }
+  });
+
+  it("links View all tasks to the routine-filtered task list", async () => {
+    routinesListMock.mockResolvedValue([]);
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Routines /></QueryClientProvider>);
+      await flush();
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("View all tasks"));
+    const link = Array.from(container.querySelectorAll("a")).find(anchor => anchor.textContent === "View all tasks");
+    expect(link?.getAttribute("href")).toBe("/issues?view=all&originKind=routine_execution&sortField=created&sortDir=desc");
+    expect(container.textContent).not.toContain("View all runs");
+    await act(() => root.unmount());
+    queryClient.clear();
+  });
+
+  it("keeps the list focused on routines and links run history to Audit", async () => {
     currentSearch = "tab=runs";
     routinesListMock.mockResolvedValue([createRoutine({ id: "routine-1" })]);
-    issuesListMock.mockResolvedValue([
-      createIssue({ id: "issue-1", title: "Routine execution A" }),
-      createIssue({ id: "issue-2", title: "Routine execution B", identifier: "PAP-1001", issueNumber: 1001 }),
-    ]);
 
     const root = createRoot(container);
     const queryClient = new QueryClient({
@@ -746,13 +1386,9 @@ describe("Routines page", () => {
       await flush();
     });
 
-    for (let attempts = 0; attempts < 5 && issuesListMock.mock.calls.length === 0; attempts += 1) {
-      await act(async () => {
-        await flush();
-      });
-    }
-
-    expect(issuesListMock).toHaveBeenCalledWith("company-1", { originKind: "routine_execution" });
+    expect(container.querySelector('a[data-redirect][href="/activity/runs"]'))
+      .not.toBeNull();
+    expect(issuesListMock).not.toHaveBeenCalled();
 
     await act(async () => {
       root.unmount();

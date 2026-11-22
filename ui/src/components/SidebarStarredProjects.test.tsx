@@ -13,7 +13,7 @@ const mockProjectsApi = vi.hoisted(() => ({ list: vi.fn() }));
 const mockResourceMembershipsApi = vi.hoisted(() => ({ listMine: vi.fn(), updateProject: vi.fn() }));
 const mockPushToast = vi.hoisted(() => vi.fn());
 const mockSetSidebarOpen = vi.hoisted(() => vi.fn());
-const mockSidebarState = vi.hoisted(() => ({ isMobile: false, collapsed: false, peeking: false }));
+const mockSidebarState = vi.hoisted(() => ({ isMobile: false }));
 
 vi.mock("@/lib/router", () => ({
   NavLink: ({ children, className, to, ...props }: {
@@ -36,8 +36,6 @@ vi.mock("../context/SidebarContext", () => ({
   useSidebar: () => ({
     isMobile: mockSidebarState.isMobile,
     setSidebarOpen: mockSetSidebarOpen,
-    collapsed: mockSidebarState.collapsed,
-    peeking: mockSidebarState.peeking,
   }),
 }));
 
@@ -124,8 +122,6 @@ describe("SidebarStarredProjects", () => {
 
   beforeEach(() => {
     mockSidebarState.isMobile = false;
-    mockSidebarState.collapsed = false;
-    mockSidebarState.peeking = false;
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
@@ -135,8 +131,10 @@ describe("SidebarStarredProjects", () => {
       agentMemberships: {},
       starredProjectIds: [],
       starredAgentIds: [],
+      starredDocumentIds: [],
       projectStarredAt: {},
       agentStarredAt: {},
+      documentStarredAt: {},
       updatedAt: null,
     };
     mockResourceMembershipsApi.listMine.mockImplementation(() => Promise.resolve(memberships));
@@ -165,22 +163,21 @@ describe("SidebarStarredProjects", () => {
     await flushReact();
   }
 
-  it("renders only starred, non-archived projects with a quiet unstar control", async () => {
+  it("renders only starred projects returned by the default active project list", async () => {
     mockProjectsApi.list.mockResolvedValue([
       makeProject({ id: "project-a", name: "Alpha", urlKey: "alpha" }),
       makeProject({ id: "project-b", name: "Bravo", urlKey: "bravo" }),
-      makeProject({ id: "project-c", name: "Ghost", urlKey: "ghost", archivedAt: new Date() }),
     ]);
     memberships = { ...memberships, starredProjectIds: ["project-b", "project-c"] };
 
     await render();
 
-    // Only the starred, non-archived project renders (archived "Ghost" is filtered out).
+    // project-c is starred but absent because the default project list is server-filtered.
     expect(projectLinkLabels(container)).toEqual(["Bravo"]);
     expect(document.body.querySelector('button[aria-label="Unstar Bravo"]')).not.toBeNull();
   });
 
-  it("keeps starred projects indented only outside the collapsed rail", async () => {
+  it("indents starred projects", async () => {
     mockProjectsApi.list.mockResolvedValue([
       makeProject({ id: "project-a", name: "Alpha", urlKey: "alpha" }),
     ]);
@@ -189,19 +186,6 @@ describe("SidebarStarredProjects", () => {
     await render();
 
     expect(projectLink(container, "alpha")?.className).toContain("pl-6");
-
-    await act(async () => root?.unmount());
-    root = null;
-    container.innerHTML = "";
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    mockSidebarState.collapsed = true;
-
-    await render();
-
-    const railProjectLink = projectLink(container, "alpha");
-    expect(railProjectLink?.className).not.toContain("pl-6");
-    const nameSpan = Array.from(container.querySelectorAll("span")).find((el) => el.textContent === "Alpha");
-    expect(nameSpan?.className).toContain("w-0");
   });
 
   it("renders nothing when no projects are starred", async () => {

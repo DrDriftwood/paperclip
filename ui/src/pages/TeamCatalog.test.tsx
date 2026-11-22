@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { createCloudHarnessPolicy } from "@/lib/cloud-harness-policy";
+import { sampleHarnesses } from "@/test-support/harness-availability";
 
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -8,8 +10,15 @@ import type {
   CatalogTeamImportPreviewResult,
 } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TeamCatalog, parseTeamRoute, teamRoute } from "./TeamCatalog";
+import {
+  TeamCatalog,
+  listTeamInstallAdapterTypes,
+  parseTeamRoute,
+  resolveTeamInstallAdapterType,
+  teamRoute,
+} from "./TeamCatalog";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { queryKeys } from "@/lib/queryKeys";
 
 const mockTeamCatalogApi = vi.hoisted(() => ({
   catalogList: vi.fn(),
@@ -27,9 +36,17 @@ const mockAgentsApi = vi.hoisted(() => ({
 const mockPushToast = vi.hoisted(() => vi.fn());
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 const mockNavigate = vi.hoisted(() => vi.fn());
+const mockAdapterAvailability = vi.hoisted(() => ({
+  disabled: new Set<string>(["paperclip_runner"]),
+  loaded: true,
+}));
 
 vi.mock("../api/teamCatalog", () => ({ teamCatalogApi: mockTeamCatalogApi }));
 vi.mock("../api/agents", () => ({ agentsApi: mockAgentsApi }));
+vi.mock("../adapters/use-disabled-adapters", () => ({
+  useDisabledAdaptersSync: () => mockAdapterAvailability.disabled,
+  useAdapterRegistryLoaded: () => mockAdapterAvailability.loaded,
+}));
 
 vi.mock("../components/MarkdownBody", () => ({
   MarkdownBody: ({ children }: { children: string }) => <div>{children}</div>,
@@ -86,6 +103,11 @@ if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
 }
 
 describe("TeamCatalog routes", () => {
+  it("limits Cloud team installation choices to released harnesses", () => {
+    expect(listTeamInstallAdapterTypes(new Set(), true, true, createCloudHarnessPolicy(sampleHarnesses)).sort()).toEqual([
+      "claude_local", "codex_local", "grok_local", "opencode_local", "paperclip_runner",
+    ]);
+  });
   it("round-trips file paths containing literal tildes", () => {
     const route = teamRoute("paperclipai/bundled/test/team", "agents/a~b/AGENTS.md");
 
@@ -94,6 +116,29 @@ describe("TeamCatalog routes", () => {
       catalogRef: "paperclipai/bundled/test/team",
       filePath: "agents/a~b/AGENTS.md",
     });
+  });
+
+  it("fails closed for Paperclip Runner until adapter availability is loaded and enabled", () => {
+    expect(listTeamInstallAdapterTypes(new Set(), false)).not.toContain("paperclip_runner");
+    expect(listTeamInstallAdapterTypes(new Set(), false)).not.toContain("process");
+    expect(listTeamInstallAdapterTypes(new Set(), false)).not.toContain("http");
+    expect(listTeamInstallAdapterTypes(new Set(["paperclip_runner"]), true))
+      .not.toContain("paperclip_runner");
+    expect(listTeamInstallAdapterTypes(new Set(), true)).toContain("paperclip_runner");
+    expect(resolveTeamInstallAdapterType("paperclip_runner", ["claude_local", "codex_local"]))
+      .toBe("claude_local");
+    expect(resolveTeamInstallAdapterType("paperclip_runner", ["codex_local"]))
+      .toBe("codex_local");
+    expect(resolveTeamInstallAdapterType("paperclip_runner", []))
+      .toBeNull();
+  });
+
+  it("preserves an allowed saved Runner only while its adapter is available", () => {
+    const harnessPolicy = createCloudHarnessPolicy(["copilot_runtime"]);
+    const options = { cloud: true, harnessPolicy, adapterConfig: { provider: "acpx", acpxAgent: "copilot" } };
+    expect(resolveTeamInstallAdapterType("paperclip_runner", [], { ...options, nativeRunnerAvailable: true })).toBe("paperclip_runner");
+    expect(resolveTeamInstallAdapterType("paperclip_runner", [], { ...options, nativeRunnerAvailable: false })).toBeNull();
+    expect(resolveTeamInstallAdapterType("paperclip_runner", [], { ...options, adapterConfig: {}, nativeRunnerAvailable: true })).toBeNull();
   });
 });
 
@@ -210,6 +255,8 @@ describe("TeamCatalog install preview path", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    mockAdapterAvailability.disabled = new Set(["paperclip_runner"]);
+    mockAdapterAvailability.loaded = true;
     container = document.createElement("div");
     document.body.appendChild(container);
     currentRoute = "team-no-deps";
@@ -237,9 +284,10 @@ describe("TeamCatalog install preview path", () => {
     vi.clearAllMocks();
   });
 
-  async function renderPage() {
+  async function renderPage(cloud = false, availableHarnesses = sampleHarnesses) {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    if (cloud) queryClient.setQueryData(queryKeys.health, { status: "ok", cloud: { managed: true, availableHarnesses } });
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
@@ -260,6 +308,64 @@ describe("TeamCatalog install preview path", () => {
     // summary grid counts
     expect(document.body.textContent).toContain("Agents");
     expect(document.body.textContent).toContain("Projects");
+  });
+
+  it.each([
+    { cloud: true, acpxAgent: "antigravity", chooseRunner: false, expected: "claude_local" },
+    { cloud: true, acpxAgent: "antigravity", chooseRunner: false, expected: "paperclip_runner", onlyRunner: true },
+    { cloud: true, acpxAgent: "antigravity", chooseRunner: true, expected: "paperclip_runner" },
+    { cloud: true, acpxAgent: "copilot", chooseRunner: false, expected: undefined },
+    { cloud: true, acpxAgent: "copilot", chooseRunner: false, expected: undefined, availableHarnesses: ["copilot_runtime"] },
+    { cloud: true, acpxAgent: "copilot", chooseRunner: false, expected: undefined, availableHarnesses: ["claude_local", "copilot_runtime"] },
+    { cloud: true, acpxAgent: "copilot", chooseRunner: true, expected: undefined, availableHarnesses: ["copilot_runtime"] },
+    { cloud: true, acpxAgent: "copilot", chooseRunner: true, expected: undefined, availableHarnesses: ["claude_local", "copilot_runtime"], chooseLegacyFirst: true },
+    { cloud: false, acpxAgent: "antigravity", chooseRunner: false, expected: undefined },
+  ])("submits the selected native team profile (cloud=$cloud, source=$acpxAgent, reset=$chooseRunner, expected=$expected, policy=$availableHarnesses)", async ({ cloud, acpxAgent, chooseRunner, expected, onlyRunner, availableHarnesses, chooseLegacyFirst }) => {
+    mockAdapterAvailability.disabled = new Set(onlyRunner ? ["claude_local", "codex_local", "grok_local", "opencode_local"] : []);
+    const preview = makePreview();
+    preview.portabilityPreview.manifest.agents = [{
+      slug: "ceo", name: "CEO", path: "agents/ceo/AGENTS.md", skills: [], role: "ceo", title: null, icon: null,
+      capabilities: null, reportsToSlug: null, reportsToExistingAgentId: null, reportsToExistingAgentSlug: null,
+      adapterType: "paperclip_runner", adapterConfig: { provider: "acpx", acpxAgent, model: "source-only-model" },
+      runtimeConfig: {}, permissions: {}, permissionGrants: [], budgetMonthlyCents: 0, metadata: null,
+    }];
+    mockTeamCatalogApi.preview.mockResolvedValue(preview);
+    const root = await renderPage(cloud, availableHarnesses);
+    await act(async () => findButton("Install team")!.click());
+    await flushReact();
+    if (chooseRunner) {
+      if (chooseLegacyFirst) {
+        const picker = [...document.querySelectorAll<HTMLButtonElement>('button[role="combobox"]')].find(button => /Paperclip Runner/.test(button.textContent ?? ""))!;
+        await act(async () => { picker.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
+        await flushReact();
+        const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent?.trim() === "Claude Code");
+        expect(option).toBeDefined();
+        await act(async () => option!.click());
+        await flushReact();
+      }
+      const picker = [...document.querySelectorAll<HTMLButtonElement>('button[role="combobox"]')]
+        .find(button => /Claude Code|Paperclip Runner/.test(button.textContent ?? ""))!;
+      expect(picker).toBeTruthy();
+      await act(async () => { picker.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
+      await flushReact();
+      const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent?.trim() === "Paperclip Runner");
+      expect(option).toBeDefined();
+      await act(async () => option!.click());
+      await flushReact();
+    }
+    const submit = [...document.querySelectorAll<HTMLButtonElement>("button")].filter(button => button.textContent?.includes("Install team")).at(-1)!;
+    expect(submit.disabled).toBe(false);
+    await act(async () => submit.click());
+    await flushReact();
+    const override = mockTeamCatalogApi.install.mock.calls[0]?.[2]?.adapterOverrides?.ceo;
+    if (expected) {
+      expect(override?.adapterType).toBe(expected);
+      expect(override?.adapterConfig).toEqual(expected === "paperclip_runner" ? { provider: "codex" } : {});
+    } else {
+      expect(mockTeamCatalogApi.install).toHaveBeenCalledTimes(1);
+      expect(override).toBeUndefined();
+    }
+    await act(async () => root.unmount());
   });
 
   it("opens the installer, fetches the preview, and submits the install", async () => {
