@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
+import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { HTTP_LOG_REDACT_PATHS } from "./http-log-redaction.js";
 import { REDACTED_LOG_HEADER_PATHS } from "./redacted-log-headers.js";
 import {
@@ -28,8 +29,12 @@ function resolveServerLogDir(): string {
   const envOverride = process.env.PAPERCLIP_LOG_DIR?.trim();
   if (envOverride) return resolveHomeAwarePath(envOverride);
 
-  const fileLogDir = readConfigFile()?.logging.logDir?.trim();
-  if (fileLogDir) return resolveHomeAwarePath(fileLogDir);
+  // A Cloud-managed instance takes its config from a runtime snapshot that is not
+  // loaded yet when this module is imported, so reading it here would throw.
+  if (!isCloudManagedInstance()) {
+    const fileLogDir = readConfigFile()?.logging.logDir?.trim();
+    if (fileLogDir) return resolveHomeAwarePath(fileLogDir);
+  }
 
   return resolveDefaultLogsDir();
 }

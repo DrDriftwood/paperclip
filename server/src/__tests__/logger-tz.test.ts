@@ -15,7 +15,8 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  *    applies translateTime to a known epoch under different TZ values.
  */
 
-const mockTransport = vi.hoisted(() => vi.fn((_options: { target: string; options: Record<string, unknown> }) => ({ write: vi.fn() })));
+type MockTransportTarget = { target: string; options: Record<string, unknown>; level?: string };
+const mockTransport = vi.hoisted(() => vi.fn((_options: { targets: MockTransportTarget[] }) => ({ write: vi.fn() })));
 const mockPino = vi.hoisted(() => {
   const fn = vi.fn(() => ({
     info: vi.fn(),
@@ -60,9 +61,26 @@ describe("logger translateTime respects TZ environment variable", () => {
     await import("../middleware/logger.js");
 
     expect(mockTransport).toHaveBeenCalledOnce();
-    const transport = mockTransport.mock.calls[0]![0];
-    expect(transport.target).toBe("pino-pretty");
-    expect(transport.options.translateTime).toBe("SYS:HH:MM:ss");
+    // LARGE FORMAT carry: two pino-pretty targets, the console and server.log.
+    const { targets } = mockTransport.mock.calls[0]![0];
+    expect(targets).toHaveLength(2);
+    for (const target of targets) {
+      expect(target.target).toBe("pino-pretty");
+      expect(target.options.translateTime).toBe("SYS:HH:MM:ss");
+    }
+    expect(targets[0]!.options.destination).toBe(1);
+    expect(targets[1]!.options.destination).toBe("/tmp/paperclip-test-logs/server.log");
+  });
+
+  it("does not read the config file at import time on a Cloud-managed instance", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("PAPERCLIP_MANAGED_CONFIG", "{}");
+    const { readConfigFile } = await import("../config-file.js");
+    await import("../middleware/logger.js");
+
+    expect(readConfigFile).not.toHaveBeenCalled();
+    const { targets } = mockTransport.mock.calls[0]![0];
+    expect(targets[1]!.options.destination).toBe("/tmp/paperclip-test-logs/server.log");
   });
 
   it("does not construct a pretty transport in production", async () => {
