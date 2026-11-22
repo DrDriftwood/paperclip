@@ -57,10 +57,9 @@ describe("Claude model defaults", () => {
     }
   });
 
-  it.each([undefined, null, "", "  "])("sends no model for an unset model (%j)", (model) => {
-    // LARGE FORMAT carry: an unset model keeps Claude Code's own default (no model is sent).
+  it.each([undefined, null, "", "  "])("uses Opus 5.5 for an unset model (%j)", (model) => {
     expect(DEFAULT_CLAUDE_LOCAL_MODEL).toBe("claude-opus-5-5");
-    expect(resolveClaudeModel(model)).toBe("");
+    expect(resolveClaudeModel(model)).toBe("claude-opus-5-5");
   });
 
   it("keeps explicit model IDs ahead of environment overrides", () => {
