@@ -29,6 +29,11 @@ const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
 const mockWorkspaceOperationService = vi.hoisted(() => ({}));
+// LARGE FORMAT carry: the git-metadata guard tests send a cwd, which reaches upstream's
+// managed-sandbox check; stub the settings it reads (policy off).
+const mockInstanceSettingsService = vi.hoisted(() => ({
+  getExperimental: vi.fn(async () => ({})),
+}));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 const mockProtectedKeyHolders = vi.hoisted(() => vi.fn());
 const mockGetTelemetryClient = vi.hoisted(() => vi.fn());
@@ -55,6 +60,10 @@ vi.mock("../services/environments.js", () => ({
 
 vi.mock("../services/secrets.js", () => ({
   secretService: () => mockSecretService,
+}));
+
+vi.mock("../services/instance-settings.js", () => ({
+  instanceSettingsService: () => mockInstanceSettingsService,
 }));
 
 vi.mock("../services/workspace-runtime.js", () => ({
@@ -91,6 +100,10 @@ function registerModuleMocks() {
 
   vi.doMock("../services/secrets.js", () => ({
     secretService: () => mockSecretService,
+  }));
+
+  vi.doMock("../services/instance-settings.js", () => ({
+    instanceSettingsService: () => mockInstanceSettingsService,
   }));
 
   vi.doMock("../services/workspace-runtime.js", () => ({
