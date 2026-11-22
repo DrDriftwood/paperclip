@@ -1,6 +1,3 @@
-import {
-  PAPERCLIP_RUNNER_DEFAULT_MODELS,
-} from "@paperclipai/adapter-utils";
 import { PAPERCLIP_RUNNER_MINIMUM_GLIBC_VERSION } from "@paperclipai/shared";
 
 export const type = "codex_local";
@@ -13,7 +10,8 @@ export const SANDBOX_INSTALL_COMMAND = "npm install -g @openai/codex";
 // model is never rewritten. Always use a concrete slug rather than a bare family alias such as
 // `gpt-5.6`: OpenAI ships no model metadata for bare slugs, so the Codex CLI warns and falls back to
 // generic context limits.
-export const DEFAULT_CODEX_LOCAL_MODEL = PAPERCLIP_RUNNER_DEFAULT_MODELS.codex;
+// LARGE FORMAT carry: keep the fork's pre-merge default; which agents move is an operator decision.
+export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.6";
 // The floor-free model a remote Codex CLI too old for the requested model falls back to. It stays
 // `gpt-5.6-sol` because the default `gpt-6.1-sol` itself needs Codex 0.159.0 or newer.
 export const CODEX_LOCAL_COMPATIBILITY_FALLBACK_MODEL = "gpt-5.6-sol";

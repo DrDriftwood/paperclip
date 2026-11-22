@@ -283,7 +283,8 @@ describe("claude_local ACP lane", () => {
       onMeta: async (payload) => { meta.push(payload); },
     }));
     expect(result.exitCode).toBe(0);
-    expect(meta[0]?.env?.ANTHROPIC_MODEL).toBe("claude-opus-5-5");
+    // LARGE FORMAT carry: an unset model keeps Claude Code's own default (no model is sent).
+    expect(meta[0]?.env?.ANTHROPIC_MODEL).toBeUndefined();
   });
 
   it("keeps ACP model precedence consistent with CLI and provider overrides", () => {

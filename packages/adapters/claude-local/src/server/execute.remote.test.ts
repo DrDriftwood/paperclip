@@ -423,7 +423,8 @@ describe("claude remote execution", () => {
     const call = runChildProcess.mock.calls.find(call => !call[2].includes("--version")) as unknown as
       | [string, string, string[], { env: Record<string, string>; remoteExecution?: { remoteCwd: string } | null }]
       | undefined;
-    expect(call?.[2]).toEqual(expect.arrayContaining(["--model", "claude-opus-5-5"]));
+    // LARGE FORMAT carry: an unset model keeps Claude Code's own default (no model is sent).
+    expect(call?.[2]).not.toContain("--model");
     expect(call?.[2]).toContain("--dangerously-skip-permissions");
     expect(call?.[2]).not.toContain("--allowedTools");
     expect(call?.[2]).toContain("--append-system-prompt-file");

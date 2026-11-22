@@ -18,7 +18,8 @@ export function resolveClaudeModel(
   ) {
     return "";
   }
-  return DEFAULT_CLAUDE_LOCAL_MODEL;
+  // LARGE FORMAT carry: an unset model keeps Claude Code's own default, as before the merge.
+  return "";
 }
 
 export const type = "claude_local";

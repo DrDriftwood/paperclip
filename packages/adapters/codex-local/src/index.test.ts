@@ -25,7 +25,8 @@ describe("codex model CLI floors", () => {
   });
 
   it("gates the default model on its CLI floor and keeps the compatibility fallback floor-free", () => {
-    expect(minimumCodexCliVersionForModel(DEFAULT_CODEX_LOCAL_MODEL)).toBe("0.159.0");
+    // LARGE FORMAT carry: the fork keeps its pre-merge default, which has no CLI floor.
+    expect(minimumCodexCliVersionForModel(DEFAULT_CODEX_LOCAL_MODEL)).toBeNull();
     expect(minimumCodexCliVersionForModel(CODEX_LOCAL_COMPATIBILITY_FALLBACK_MODEL)).toBeNull();
   });
 
@@ -83,7 +84,8 @@ describe("codex local adapter metadata", () => {
 
     // Default to gpt-6.1-sol, half the gpt-5.6-sol price on the reviewed rate card. Bare family
     // aliases such as gpt-5.6 have no Codex metadata, so they are never advertised or the default.
-    expect(DEFAULT_CODEX_LOCAL_MODEL).toBe("gpt-6.1-sol");
+    // LARGE FORMAT carry: the fork keeps its pre-merge default; the operator decides which agents move.
+    expect(DEFAULT_CODEX_LOCAL_MODEL).toBe("gpt-5.6");
     expect(CODEX_LOCAL_COMPATIBILITY_FALLBACK_MODEL).toBe("gpt-5.6-sol");
     // Ordered like the ChatGPT app: newest version first, then by capability within a version (#14878).
     expect(modelIds.slice(0, 15)).toEqual([
